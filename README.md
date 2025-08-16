@@ -1,19 +1,14 @@
-# Proyecto completo: Normalización + SQL Server
+# normalizacion-react (Frontend)
 
-Estructura:
-- normalizacion-react (Frontend Vite/React)
-- normalizacion-backend-sqlserver (Backend Node/Express con SQL Server)
+## Pasos
+1) `npm install`
+2) Copia `.env.example` a `.env` (ajusta `VITE_API_URL` si el backend no está en 4000)
+3) `npm run dev`
 
-Recomendación: descomprime el ZIP en `C:\dev\`.
-
-## Backend
-1) cd normalizacion-backend-sqlserver
-2) npm install
-3) copia .env.example a .env y ajusta credenciales
-4) npm start  (http://localhost:4000)
-
-## Frontend
-1) cd normalizacion-react
-2) npm install
-3) copia .env.example a .env (VITE_API_URL=http://localhost:4000)
-4) npm run dev  (http://localhost:5173)
+## Funciones
+- Cargar CSV/Excel
+- Seleccionar 1FN/2FN/3FN
+- Visualizar ER con React Flow
+- Exportar CSV (ZIP) y SQL
+- Listar/cargar tablas desde SQL Server
+- Subir normalización al backend

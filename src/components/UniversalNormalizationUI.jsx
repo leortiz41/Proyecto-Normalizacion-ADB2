@@ -10,16 +10,24 @@ import "reactflow/dist/style.css";
 // =======================
 // UTILIDADES PARA 3FN
 // =======================
-const CLEAN_SPLIT = /[,;|/]+/;
+
+// Convierte una cadena en un nombre adecuado para SQL, reemplazando caracteres no permitidos.
 const toSQLName = (s = "") =>
   s.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^\d/, "x");
 
+// Función que determina si un valor es un entero.
 const isInt = (v) => /^-?\d+$/.test(String(v ?? "").trim());
+
+// Función que determina si un valor es numérico (con decimales).
 const isNum = (v) => /^-?\d+(\.\d+)?$/.test(String(v ?? "").trim());
+
+// Devuelve verdadero si el valor se comprende como booleano.
 const isBool = (v) =>
   ["true", "false", "0", "1", "si", "no", "yes", "y", "n"].includes(
     String(v ?? "").trim().toLowerCase()
   );
+
+// Determina si el valor tiene formato de fecha.
 const isDate = (v) => {
   const s = String(v ?? "").trim();
   if (!s) return false;
@@ -29,6 +37,7 @@ const isDate = (v) => {
   return !isNaN(d.getTime());
 };
 
+// Infiera el tipo SQL de una columna basado en sus valores.
 const inferSqlType = (values = []) => {
   let allInt = true,
     allNum = true,
@@ -51,6 +60,8 @@ const inferSqlType = (values = []) => {
   return `NVARCHAR(${size})`;
 };
 
+// Función para normalizar los datos a Primera Forma Normal (1FN).  
+// Si hay valores con comas, separa en filas distintas.
 const normalize1FNRows = (rows) => {
   let output = [];
   let rowIndex = 0;
@@ -84,6 +95,8 @@ const normalize1FNRows = (rows) => {
 // =======================
 // FUNCIONES DE ANALISIS Y GENERACION DE SQL
 // =======================
+
+// Analiza las dependencias de los datos para identificar la tabla principal y las entidades candidatas basadas en un umbral.
 const analyzeDependencies = (data) => {
   if (!data || !data.length) return { mainTable: null, candidateEntities: [] };
 
@@ -92,6 +105,7 @@ const analyzeDependencies = (data) => {
   let mainTableColumns = [...allColumns];
   const candidateEntities = [];
 
+  // Recorre cada columna para determinar si puede ser candidata (menor cantidad de valores distintos)
   allColumns.forEach((col) => {
     const distinctCount = new Set(data.map((row) => row[col])).size;
     if (distinctCount < THRESHOLD) {
@@ -110,6 +124,7 @@ const analyzeDependencies = (data) => {
     }
   });
 
+  // Construye la tabla principal con sus columnas y claves foráneas
   const mainTable = {
     tableName: "Tabla_Principal",
     primaryKey: "ID_Main",
@@ -133,6 +148,7 @@ const analyzeDependencies = (data) => {
   return { mainTable, candidateEntities };
 };
 
+// Genera el script SQL basado en el análisis realizado.
 const generateSqlFromAnalysis = (analysis) => {
   const { mainTable, candidateEntities } = analysis;
   const createDatabase = `CREATE DATABASE ProyectoNormalizacion;\n\nUSE ProyectoNormalizacion;\n\n`;
@@ -145,23 +161,13 @@ const generateSqlFromAnalysis = (analysis) => {
         }`
     )
     .join(",\n");
-  const mainPkScript = `  CONSTRAINT [PK_${toSQLName(
-    mainTable.tableName
-  )}] PRIMARY KEY ([${mainTable.primaryKey}])`;
-  const mainTableScript = `CREATE TABLE [${toSQLName(
-    mainTable.tableName
-  )}] (\n${mainTableColumnsScript},\n${mainPkScript}\n);`;
+  const mainPkScript = `  CONSTRAINT [PK_${toSQLName(mainTable.tableName)}] PRIMARY KEY ([${mainTable.primaryKey}])`;
+  const mainTableScript = `CREATE TABLE [${toSQLName(mainTable.tableName)}] (\n${mainTableColumnsScript},\n${mainPkScript}\n);`;
 
   const mainFkScripts = mainTable.foreignKeys
     .map(
       (fk) =>
-        `ALTER TABLE [${toSQLName(
-          mainTable.tableName
-        )}] ADD CONSTRAINT [FK_${toSQLName(
-          mainTable.tableName
-        )}_${toSQLName(fk.foreignKey)}] FOREIGN KEY ([${fk.foreignKey}]) REFERENCES [${toSQLName(
-          fk.referencedTable
-        )}] ([${toSQLName(fk.referencedField)}]);`
+        `ALTER TABLE [${toSQLName(mainTable.tableName)}] ADD CONSTRAINT [FK_${toSQLName(mainTable.tableName)}_${toSQLName(fk.foreignKey)}] FOREIGN KEY ([${fk.foreignKey}]) REFERENCES [${toSQLName(fk.referencedTable)}] ([${toSQLName(fk.referencedField)}]);`
     )
     .join("\n");
 
@@ -175,9 +181,7 @@ const generateSqlFromAnalysis = (analysis) => {
             }`
         )
         .join(",\n");
-      const pkScript = `  CONSTRAINT [PK_${toSQLName(
-        entity.tableName
-      )}] PRIMARY KEY ([${toSQLName(entity.primaryKey)}])`;
+      const pkScript = `  CONSTRAINT [PK_${toSQLName(entity.tableName)}] PRIMARY KEY ([${toSQLName(entity.primaryKey)}])`;
       return `CREATE TABLE [${toSQLName(entity.tableName)}] (\n${columnsScript},\n${pkScript}\n);`;
     })
     .join("\n\n");
@@ -185,6 +189,7 @@ const generateSqlFromAnalysis = (analysis) => {
   return createDatabase + mainTableScript + "\n\n" + mainFkScripts + "\n\n" + candidateScripts;
 };
 
+// Genera un string CSV con la información del análisis.
 const generateCSVFromAnalysis = (analysis) => {
   const { mainTable, candidateEntities } = analysis;
   const rows = [];
@@ -194,10 +199,7 @@ const generateCSVFromAnalysis = (analysis) => {
     mainTable.primaryKey,
     mainTable.columns.join(" | "),
     mainTable.foreignKeys
-      .map(
-        (fk) =>
-          `${fk.foreignKey} -> ${fk.referencedTable}(${fk.referencedField})`
-      )
+      .map((fk) => `${fk.foreignKey} -> ${fk.referencedTable}(${fk.referencedField})`)
       .join(" | ")
   ]);
   candidateEntities.forEach((ent) => {
@@ -211,6 +213,11 @@ const generateCSVFromAnalysis = (analysis) => {
   return rows.map((row) => row.map((cell) => `"${cell}"`).join(",")).join("\n");
 };
 
+// =======================
+// FUNCIONES DE DESCARGA DE ARCHIVOS
+// =======================
+
+// Función genérica para descargar un archivo
 const downloadFile = (data, filename, type) => {
   const blob = new Blob([data], { type });
   const url = URL.createObjectURL(blob);
@@ -232,33 +239,45 @@ const downloadCSV = (csvData) => {
 // =======================
 // ER PARA REACT FLOW
 // =======================
+
+// Función que crea el diagrama ER para React Flow a partir del objeto "analysis"
+// Devuelve un objeto con un título, nodos y aristas.
 const createERDiagram = (analysis) => {
+  // Verificamos que exista la tabla principal para continuar.
+  if (!analysis || !analysis.mainTable) {
+    console.error("No se encontró la tabla principal en el análisis.");
+    return { title: "Diagrama Entidad-Relación", nodes: [], edges: [] };
+  }
+
+  // Función interna que construye un nodo a partir de la definición de una tabla.
   const buildNodeBySchema = (t) => ({
-    id: t.tableName,
+    id: t.tableName,  // Se usa el nombre de la tabla como identificador
     data: {
       tableName: t.tableName,
       columns: t.columns,
       primaryKey: t.primaryKey,
       foreignKeys: t.foreignKeys || [],
+      // Se define el contenido HTML del nodo, mostrando su PK, FK y columnas.
       label: (
         <div>
           <strong>{t.tableName}</strong>
           <p style={{ fontSize: 12, margin: "4px 0" }}>
             PK: {Array.isArray(t.primaryKey) ? t.primaryKey.join(", ") : t.primaryKey}
           </p>
-          {t.foreignKeys?.length ? (
+          {t.foreignKeys && t.foreignKeys.length > 0 && (
             <p style={{ fontSize: 12, margin: "4px 0" }}>
               FK: {t.foreignKeys.map(f => f.foreignKey).join(", ")}
             </p>
-          ) : null}
+          )}
           <ul style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>
             {t.columns.map(c => (<li key={c}>{c}</li>))}
           </ul>
         </div>
       ),
     },
+    // Posición aleatoria para distribuir los nodos en el canvas.
     position: { x: Math.random() * 500, y: Math.random() * 400 },
-    type: "editable",
+    type: "editable", // Puedes cambiar este tipo si tienes estilos personalizados para tus nodos.
     style: {
       borderRadius: 18,
       padding: 10,
@@ -268,24 +287,34 @@ const createERDiagram = (analysis) => {
       boxShadow: "0 2px 10px #bae6fd",
     },
   });
+
+  // Se crean los nodos a partir de la tabla principal y las entidades candidatas.
   const nodes = [
     buildNodeBySchema(analysis.mainTable),
     ...analysis.candidateEntities.map(buildNodeBySchema)
   ];
+  
+  // Se generan las aristas basadas en las claves foráneas.
   const edges = [];
   const addEdges = (t) => {
-    for (const fk of t.foreignKeys || []) {
+    // Aseguramos que la propiedad foreignKeys exista.
+    (t.foreignKeys || []).forEach((fk) => {
       edges.push({
         id: `edge_${t.tableName}_${fk.referencedTable}_${fk.foreignKey}`,
-        source: t.tableName,
-        target: fk.referencedTable,
-        label: `FK ${fk.foreignKey} → ${fk.referencedTable}(${fk.referencedField})`
+        source: t.tableName,               // Origen: la tabla actual
+        target: fk.referencedTable,        // Destino: la tabla referenciada en la FK
+        label: `FK ${fk.foreignKey} → ${fk.referencedTable}(${fk.referencedField})`,
+        animated: true,                    // Opcional: para animar la conexión
+        type: "smoothstep",                // Tipo de conexión (smoothstep, straight, etc.)
       });
-    }
+    });
   };
+  
+  // Procesa las aristas tanto para la tabla principal como para las candidatas.
   addEdges(analysis.mainTable);
   analysis.candidateEntities.forEach(addEdges);
-  // Devuelve el título junto con nodos y aristas
+
+  // Se devuelve el objeto que incluye el título para mostrar en pantalla y los datos del diagrama.
   return { title: "Diagrama Entidad-Relación", nodes, edges };
 };
 
@@ -293,14 +322,20 @@ const createERDiagram = (analysis) => {
 // COMPONENTE PRINCIPAL
 // =======================
 export default function UniversalNormalizationUI() {
+  // Estados para almacenar los datos, script SQL, nodos, aristas y otros resultados
   const [data, setData] = useState([]);
   const [sqlScript, setSqlScript] = useState("");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [alertMsg, setAlertMsg] = useState("");
+  // Estado para almacenar el título del diagrama
   const [diagramTitle, setDiagramTitle] = useState("");
+  const [sqlDiagramNodes, setSqlDiagramNodes] = useState([]);
+  const [sqlDiagramEdges, setSqlDiagramEdges] = useState([]);
+  const [sqlDiagramTitle, setSqlDiagramTitle] = useState("");
 
+  // Maneja la carga de archivos CSV o Excel, normalizando los datos a 1FN.
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -335,6 +370,7 @@ export default function UniversalNormalizationUI() {
     }
   };
 
+  // Analiza los datos cargados, genera el script SQL y extrae las entidades
   const handleAnalyze = () => {
     if (!data.length) {
       alert("No se ha cargado data.");
@@ -345,17 +381,29 @@ export default function UniversalNormalizationUI() {
     setAnalysisResult(analysis);
     const sql = generateSqlFromAnalysis(analysis);
     setSqlScript(sql);
+    // Actualiza los nodos y aristas usando funciones de React Flow basadas en la estructura de entidades
     const allEntities = [analysis.mainTable, ...analysis.candidateEntities];
     setNodes(generateReactFlowNodesFromEntities(allEntities));
     setEdges(generateReactFlowEdgesFromEntities(allEntities));
   };
 
+  // Actualiza el diagrama utilizando la función createERDiagram, mostrando el título del diagrama
   const handleVisualizeER = () => {
     if (analysisResult) {
       const diagram = createERDiagram(analysisResult);
       setNodes(diagram.nodes);
       setEdges(diagram.edges);
       setDiagramTitle(diagram.title);
+    }
+  };
+
+  // Nueva función que genera el diagrama ER a partir del análisis (el mismo que genera el SQL)
+  const handleGenerateERFromSQL = () => {
+    if (analysisResult) {
+      const diagram = createERDiagram(analysisResult);
+      setSqlDiagramNodes(diagram.nodes);
+      setSqlDiagramEdges(diagram.edges);
+      setSqlDiagramTitle(diagram.title + " (Generado a partir del SQL)");
     }
   };
 
@@ -391,23 +439,20 @@ export default function UniversalNormalizationUI() {
         <Card style={{ marginTop: 24 }}>
           <CardContent>
             <h3>Script SQL Generado</h3>
-            <pre
-              style={{
-                overflowX: "auto",
-                background: "#f4f4f4",
-                padding: 12,
-              }}
-            >
+            <pre style={{ overflowX: "auto", background: "#f4f4f4", padding: 12 }}>
               {sqlScript}
             </pre>
             <div style={{ marginTop: 12 }}>
-              <Button onClick={() => downloadSQL(sqlScript)}>
+              <Button 
+                style={{ backgroundColor: "#1976d2", color: "#fff" }}
+                onClick={() => downloadSQL(sqlScript)}
+              >
                 Descargar Script SQL
               </Button>
               {analysisResult && (
                 <>
                   <Button
-                    style={{ marginLeft: 12 }}
+                    style={{ marginLeft: 12, backgroundColor: "#1976d2", color: "#fff" }}
                     onClick={() => {
                       const csv = generateCSVFromAnalysis(analysisResult);
                       downloadCSV(csv);
@@ -416,10 +461,10 @@ export default function UniversalNormalizationUI() {
                     Descargar CSV
                   </Button>
                   <Button
-                    style={{ marginLeft: 12 }}
-                    onClick={handleVisualizeER}
+                    style={{ marginLeft: 12, backgroundColor: "#1976d2", color: "#fff" }}
+                    onClick={handleGenerateERFromSQL}
                   >
-                    Visualizar Diagrama ER
+                    Generar Diagrama ER a partir del SQL
                   </Button>
                 </>
               )}
@@ -484,8 +529,25 @@ export default function UniversalNormalizationUI() {
       {nodes.length > 0 && (
         <Card style={{ marginTop: 24, height: 500 }}>
           <CardContent>
-            <h3 style={{ textAlign: "center", marginBottom: 12 }}>{diagramTitle}</h3>
+            {/* Se muestra el título del diagrama ER */}
+            <h3 style={{ textAlign: "center", marginBottom: 12 }}>
+              {diagramTitle}
+            </h3>
             <ReactFlow nodes={nodes} edges={edges} fitView>
+              <MiniMap />
+              <Controls />
+              <Background gap={16} />
+            </ReactFlow>
+          </CardContent>
+        </Card>
+      )}
+      {sqlDiagramNodes.length > 0 && (
+        <Card style={{ marginTop: 24, height: 500 }}>
+          <CardContent>
+            <h3 style={{ textAlign: "center", marginBottom: 12 }}>
+              {sqlDiagramTitle}
+            </h3>
+            <ReactFlow nodes={sqlDiagramNodes} edges={sqlDiagramEdges} fitView>
               <MiniMap />
               <Controls />
               <Background gap={16} />

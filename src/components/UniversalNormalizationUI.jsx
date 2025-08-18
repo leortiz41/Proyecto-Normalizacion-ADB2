@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Button } from "./ui/button.jsx";
 import { Card, CardContent } from "./ui/card.jsx";
 import { Input } from "./ui/input.jsx";
@@ -6,15 +6,13 @@ import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import ReactFlow, { MiniMap, Controls, Background } from "reactflow";
 import "reactflow/dist/style.css";
-import EditableNode from "./EditableNode";
 
 // =======================
 // UTILIDADES PARA 3FN
 // =======================
 const CLEAN_SPLIT = /[,;|/]+/;
-const toSQLName = (s = "") => {
-  return s.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^\d/, "x");
-};
+const toSQLName = (s = "") =>
+  s.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^\d/, "x");
 
 const isInt = (v) => /^-?\d+$/.test(String(v ?? "").trim());
 const isNum = (v) => /^-?\d+(\.\d+)?$/.test(String(v ?? "").trim());
@@ -84,7 +82,7 @@ const normalize1FNRows = (rows) => {
 };
 
 // =======================
-// Función actualizada para análisis y normalización (3FN)
+// FUNCIONES DE ANALISIS Y GENERACION DE SQL
 // =======================
 const analyzeDependencies = (data) => {
   if (!data || !data.length) return { mainTable: null, candidateEntities: [] };
@@ -115,7 +113,7 @@ const analyzeDependencies = (data) => {
   const mainTable = {
     tableName: "Tabla_Principal",
     primaryKey: "ID_Main",
-    columns: ["ID_Main", ...mainTableColumns, ...candidateEntities.map((ent) => ent.primaryKey)],
+    columns: ["ID_Main", ...mainTableColumns, ...candidateEntities.map(ent => ent.primaryKey)],
     foreignKeys: candidateEntities.map((ent) => ({
       foreignKey: ent.primaryKey,
       referencedTable: ent.tableName,
@@ -135,73 +133,84 @@ const analyzeDependencies = (data) => {
   return { mainTable, candidateEntities };
 };
 
-
-// =======================
-// Función para generar Script SQL (incluye constraints de FK)
-// =======================
 const generateSqlFromAnalysis = (analysis) => {
   const { mainTable, candidateEntities } = analysis;
   const createDatabase = `CREATE DATABASE ProyectoNormalizacion;\n\nUSE ProyectoNormalizacion;\n\n`;
 
-  const mainTableColumnsScript = mainTable.columns.map((col) => {
-    const type = mainTable.types[col] || "NVARCHAR(100)";
-    return `  [${col}] ${type} ${col === mainTable.primaryKey ? "NOT NULL" : "NULL"}`;
-  }).join(",\n");
-  const mainPkScript = `  CONSTRAINT [PK_${toSQLName(mainTable.tableName)}] PRIMARY KEY ([${mainTable.primaryKey}])`;
-  const mainTableScript = `CREATE TABLE [${toSQLName(mainTable.tableName)}] (\n${mainTableColumnsScript},\n${mainPkScript}\n);`;
+  const mainTableColumnsScript = mainTable.columns
+    .map(
+      (col) =>
+        `  [${col}] ${mainTable.types[col] || "NVARCHAR(100)"} ${
+          col === mainTable.primaryKey ? "NOT NULL" : "NULL"
+        }`
+    )
+    .join(",\n");
+  const mainPkScript = `  CONSTRAINT [PK_${toSQLName(
+    mainTable.tableName
+  )}] PRIMARY KEY ([${mainTable.primaryKey}])`;
+  const mainTableScript = `CREATE TABLE [${toSQLName(
+    mainTable.tableName
+  )}] (\n${mainTableColumnsScript},\n${mainPkScript}\n);`;
 
-  const mainFkScripts = mainTable.foreignKeys.map((fk) =>
-    `ALTER TABLE [${toSQLName(mainTable.tableName)}] ADD CONSTRAINT [FK_${toSQLName(mainTable.tableName)}_${toSQLName(fk.foreignKey)}] FOREIGN KEY ([${fk.foreignKey}]) REFERENCES [${toSQLName(fk.referencedTable)}] ([${toSQLName(fk.referencedField)}]);`
-  ).join("\n");
+  const mainFkScripts = mainTable.foreignKeys
+    .map(
+      (fk) =>
+        `ALTER TABLE [${toSQLName(
+          mainTable.tableName
+        )}] ADD CONSTRAINT [FK_${toSQLName(
+          mainTable.tableName
+        )}_${toSQLName(fk.foreignKey)}] FOREIGN KEY ([${fk.foreignKey}]) REFERENCES [${toSQLName(
+          fk.referencedTable
+        )}] ([${toSQLName(fk.referencedField)}]);`
+    )
+    .join("\n");
 
-  const candidateScripts = candidateEntities.map((entity) => {
-    const columnsScript = entity.columns.map((col) => {
-      const type = entity.types[col] || "NVARCHAR(100)";
-      return `  [${toSQLName(col)}] ${type} ${col === entity.primaryKey ? "NOT NULL" : "NULL"}`;
-    }).join(",\n");
-    const pkScript = `  CONSTRAINT [PK_${toSQLName(entity.tableName)}] PRIMARY KEY ([${toSQLName(entity.primaryKey)}])`;
-    return `CREATE TABLE [${toSQLName(entity.tableName)}] (\n${columnsScript},\n${pkScript}\n);`;
-  }).join("\n\n");
+  const candidateScripts = candidateEntities
+    .map((entity) => {
+      const columnsScript = entity.columns
+        .map(
+          (col) =>
+            `  [${toSQLName(col)}] ${entity.types[col] || "NVARCHAR(100)"} ${
+              col === entity.primaryKey ? "NOT NULL" : "NULL"
+            }`
+        )
+        .join(",\n");
+      const pkScript = `  CONSTRAINT [PK_${toSQLName(
+        entity.tableName
+      )}] PRIMARY KEY ([${toSQLName(entity.primaryKey)}])`;
+      return `CREATE TABLE [${toSQLName(entity.tableName)}] (\n${columnsScript},\n${pkScript}\n);`;
+    })
+    .join("\n\n");
 
   return createDatabase + mainTableScript + "\n\n" + mainFkScripts + "\n\n" + candidateScripts;
 };
 
-// =======================
-// Función para generar CSV a partir del análisis
-// =======================
 const generateCSVFromAnalysis = (analysis) => {
   const { mainTable, candidateEntities } = analysis;
-  // Encabezado del CSV: Table, PrimaryKey, Columns, ForeignKeys
   const rows = [];
   rows.push(["Table", "PrimaryKey", "Columns", "ForeignKeys"]);
-  
-  // Agregamos la tabla principal
   rows.push([
     mainTable.tableName,
     mainTable.primaryKey,
     mainTable.columns.join(" | "),
     mainTable.foreignKeys
-      .map(fk => `${fk.foreignKey} -> ${fk.referencedTable}(${fk.referencedField})`)
+      .map(
+        (fk) =>
+          `${fk.foreignKey} -> ${fk.referencedTable}(${fk.referencedField})`
+      )
       .join(" | ")
   ]);
-  
-  // Agregamos cada entidad candidata
-  candidateEntities.forEach(ent => {
+  candidateEntities.forEach((ent) => {
     rows.push([
       ent.tableName,
       ent.primaryKey,
       ent.columns.join(" | "),
-      "" // Las entidades candidatas no tienen FK propias
+      ""
     ]);
   });
-  
-  // Convertir array de arrays a string CSV
-  return rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
+  return rows.map((row) => row.map((cell) => `"${cell}"`).join(",")).join("\n");
 };
 
-// =======================
-// Funciones para descarga de archivos
-// =======================
 const downloadFile = (data, filename, type) => {
   const blob = new Blob([data], { type });
   const url = URL.createObjectURL(blob);
@@ -221,7 +230,67 @@ const downloadCSV = (csvData) => {
 };
 
 // =======================
-// Componente principal
+// ER PARA REACT FLOW
+// =======================
+const createERDiagram = (analysis) => {
+  const buildNodeBySchema = (t) => ({
+    id: t.tableName,
+    data: {
+      tableName: t.tableName,
+      columns: t.columns,
+      primaryKey: t.primaryKey,
+      foreignKeys: t.foreignKeys || [],
+      label: (
+        <div>
+          <strong>{t.tableName}</strong>
+          <p style={{ fontSize: 12, margin: "4px 0" }}>
+            PK: {Array.isArray(t.primaryKey) ? t.primaryKey.join(", ") : t.primaryKey}
+          </p>
+          {t.foreignKeys?.length ? (
+            <p style={{ fontSize: 12, margin: "4px 0" }}>
+              FK: {t.foreignKeys.map(f => f.foreignKey).join(", ")}
+            </p>
+          ) : null}
+          <ul style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>
+            {t.columns.map(c => (<li key={c}>{c}</li>))}
+          </ul>
+        </div>
+      ),
+    },
+    position: { x: Math.random() * 500, y: Math.random() * 400 },
+    type: "editable",
+    style: {
+      borderRadius: 18,
+      padding: 10,
+      background: "#F0F9FF",
+      minWidth: 220,
+      border: "2px solid #38bdf8",
+      boxShadow: "0 2px 10px #bae6fd",
+    },
+  });
+  const nodes = [
+    buildNodeBySchema(analysis.mainTable),
+    ...analysis.candidateEntities.map(buildNodeBySchema)
+  ];
+  const edges = [];
+  const addEdges = (t) => {
+    for (const fk of t.foreignKeys || []) {
+      edges.push({
+        id: `edge_${t.tableName}_${fk.referencedTable}_${fk.foreignKey}`,
+        source: t.tableName,
+        target: fk.referencedTable,
+        label: `FK ${fk.foreignKey} → ${fk.referencedTable}(${fk.referencedField})`
+      });
+    }
+  };
+  addEdges(analysis.mainTable);
+  analysis.candidateEntities.forEach(addEdges);
+  // Devuelve el título junto con nodos y aristas
+  return { title: "Diagrama Entidad-Relación", nodes, edges };
+};
+
+// =======================
+// COMPONENTE PRINCIPAL
 // =======================
 export default function UniversalNormalizationUI() {
   const [data, setData] = useState([]);
@@ -229,7 +298,8 @@ export default function UniversalNormalizationUI() {
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [analysisResult, setAnalysisResult] = useState(null);
-  const [alertMsg, setAlertMsg] = useState(""); // Estado para el mensaje de alerta
+  const [alertMsg, setAlertMsg] = useState("");
+  const [diagramTitle, setDiagramTitle] = useState("");
 
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
@@ -239,8 +309,8 @@ export default function UniversalNormalizationUI() {
         header: true,
         skipEmptyLines: true,
         complete: (results) => {
-          const cleanData = results.data.filter(row =>
-            Object.values(row).some(val => val !== "" && val != null)
+          const cleanData = results.data.filter((row) =>
+            Object.values(row).some((val) => val !== "" && val != null)
           );
           const normalized = normalize1FNRows(cleanData);
           setData(normalized);
@@ -253,8 +323,8 @@ export default function UniversalNormalizationUI() {
         const workbook = XLSX.read(data, { type: "array" });
         const worksheet = workbook.Sheets[workbook.SheetNames[0]];
         const jsonData = XLSX.utils.sheet_to_json(worksheet);
-        const cleanData = jsonData.filter(row =>
-          Object.values(row).some(val => val !== "" && val != null)
+        const cleanData = jsonData.filter((row) =>
+          Object.values(row).some((val) => val !== "" && val != null)
         );
         const normalized = normalize1FNRows(cleanData);
         setData(normalized);
@@ -280,9 +350,25 @@ export default function UniversalNormalizationUI() {
     setEdges(generateReactFlowEdgesFromEntities(allEntities));
   };
 
+  const handleVisualizeER = () => {
+    if (analysisResult) {
+      const diagram = createERDiagram(analysisResult);
+      setNodes(diagram.nodes);
+      setEdges(diagram.edges);
+      setDiagramTitle(diagram.title);
+    }
+  };
+
   return (
     <div style={{ padding: 24 }}>
-      <h1 style={{ textAlign: "center", fontWeight: "bold", marginBottom: 24, color: "#1976d2" }}>
+      <h1
+        style={{
+          textAlign: "center",
+          fontWeight: "bold",
+          marginBottom: 24,
+          color: "#1976d2",
+        }}
+      >
         PROYECTO NORMALIZACION ADB2 GRUPO#3
       </h1>
       <Card>
@@ -292,11 +378,12 @@ export default function UniversalNormalizationUI() {
           <Button onClick={handleAnalyze}>Analizar y Generar SQL</Button>
         </CardContent>
       </Card>
-      {/* Card con mensaje de alerta */}
       {alertMsg && (
         <Card style={{ marginTop: 24, background: "#e3f2fd" }}>
           <CardContent>
-            <p style={{ textAlign: "center", fontWeight: "bold" }}>{alertMsg}</p>
+            <p style={{ textAlign: "center", fontWeight: "bold" }}>
+              {alertMsg}
+            </p>
           </CardContent>
         </Card>
       )}
@@ -304,7 +391,13 @@ export default function UniversalNormalizationUI() {
         <Card style={{ marginTop: 24 }}>
           <CardContent>
             <h3>Script SQL Generado</h3>
-            <pre style={{ overflowX: "auto", background: "#f4f4f4", padding: 12 }}>
+            <pre
+              style={{
+                overflowX: "auto",
+                background: "#f4f4f4",
+                padding: 12,
+              }}
+            >
               {sqlScript}
             </pre>
             <div style={{ marginTop: 12 }}>
@@ -312,31 +405,52 @@ export default function UniversalNormalizationUI() {
                 Descargar Script SQL
               </Button>
               {analysisResult && (
-                <Button
-                  style={{ marginLeft: 12 }}
-                  onClick={() => {
-                    const csv = generateCSVFromAnalysis(analysisResult);
-                    downloadCSV(csv);
-                  }}
-                >
-                  Descargar CSV
-                </Button>
+                <>
+                  <Button
+                    style={{ marginLeft: 12 }}
+                    onClick={() => {
+                      const csv = generateCSVFromAnalysis(analysisResult);
+                      downloadCSV(csv);
+                    }}
+                  >
+                    Descargar CSV
+                  </Button>
+                  <Button
+                    style={{ marginLeft: 12 }}
+                    onClick={handleVisualizeER}
+                  >
+                    Visualizar Diagrama ER
+                  </Button>
+                </>
               )}
             </div>
           </CardContent>
         </Card>
       )}
-      {/* Vista Previa de los datos */}
       {data.length > 0 && (
         <Card style={{ marginTop: 24 }}>
           <CardContent>
-            <h3 style={{ textAlign: "center", marginBottom: 12 }}>Vista Previa del Archivo Subido</h3>
+            <h3
+              style={{
+                textAlign: "center",
+                marginBottom: 12,
+              }}
+            >
+              Vista Previa del Archivo Subido
+            </h3>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
                     {Object.keys(data[0]).map((header, index) => (
-                      <th key={index} style={{ border: "1px solid #ddd", padding: "8px", backgroundColor: "#f2f2f2" }}>
+                      <th
+                        key={index}
+                        style={{
+                          border: "1px solid #ddd",
+                          padding: "8px",
+                          backgroundColor: "#f2f2f2",
+                        }}
+                      >
                         {header}
                       </th>
                     ))}
@@ -346,7 +460,13 @@ export default function UniversalNormalizationUI() {
                   {data.slice(0, 10).map((row, i) => (
                     <tr key={i}>
                       {Object.values(row).map((cell, j) => (
-                        <td key={j} style={{ border: "1px solid #ddd", padding: "8px" }}>
+                        <td
+                          key={j}
+                          style={{
+                            border: "1px solid #ddd",
+                            padding: "8px",
+                          }}
+                        >
                           {cell ?? ""}
                         </td>
                       ))}
@@ -355,14 +475,16 @@ export default function UniversalNormalizationUI() {
                 </tbody>
               </table>
             </div>
-            <p style={{ fontSize: 12, marginTop: 8 }}>Mostrando las primeras 10 filas</p>
+            <p style={{ fontSize: 12, marginTop: 8 }}>
+              Mostrando las primeras 10 filas
+            </p>
           </CardContent>
         </Card>
       )}
-      {/* Diagrama ER - React Flow al final */}
       {nodes.length > 0 && (
         <Card style={{ marginTop: 24, height: 500 }}>
           <CardContent>
+            <h3 style={{ textAlign: "center", marginBottom: 12 }}>{diagramTitle}</h3>
             <ReactFlow nodes={nodes} edges={edges} fitView>
               <MiniMap />
               <Controls />
@@ -374,72 +496,4 @@ export default function UniversalNormalizationUI() {
     </div>
   );
 }
-
-// =======================
-// Funciones para generación de React Flow nodes y edges
-// =======================
-function buildNode(tableDef) {
-  return ({
-    id: tableDef.tableName,
-    data: {
-      tableName: tableDef.tableName,
-      columns: tableDef.columns,
-      primaryKey: tableDef.primaryKey,
-      foreignKeys: tableDef.foreignKeys || [],
-      label: (
-        <div>
-          <strong>{tableDef.tableName}</strong>
-          <p style={{ fontSize: 12, margin: "4px 0" }}>
-            PK: {Array.isArray(tableDef.primaryKey) ? tableDef.primaryKey.join(", ") : tableDef.primaryKey}
-          </p>
-          {tableDef.foreignKeys && tableDef.foreignKeys.length > 0 && (
-            <p style={{ fontSize: 12, margin: "4px 0" }}>
-              FK:&nbsp;
-              {tableDef.foreignKeys
-                .map(fk => `${fk.foreignKey} → ${fk.referencedTable}(${fk.referencedField})`)
-                .join(", ")}
-            </p>
-          )}
-          <ul style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>
-            {tableDef.columns.map(c => (<li key={c}>{c}</li>))}
-          </ul>
-        </div>
-      ),
-    },
-    position: { x: Math.random() * 400, y: Math.random() * 400 },
-    type: "editable",
-    style: {
-      borderRadius: 18,
-      padding: 10,
-      background: "#F0F9FF",
-      minWidth: 190,
-      border: "2px solid #38bdf8",
-      boxShadow: "0 2px 10px #bae6fd",
-    },
-  });
-}
-
-const generateReactFlowNodesFromEntities = (entities) => {
-  return entities.map((entity) => buildNode(entity));
-};
-
-const generateReactFlowEdgesFromEntities = (entities) => {
-  const edges = [];
-  for (const entity of entities) {
-    for (const fk of entity.foreignKeys || []) {
-      const target = entities.find((e) => e.primaryKey === fk);
-      if (target) {
-        edges.push({
-          id: `${entity.name}->${target.name}`,
-          source: entity.name,
-          target: target.name,
-          label: `FK: ${fk.foreignKey}`,
-          animated: true,
-          type: "smoothstep",
-        });
-      }
-    }
-  }
-  return edges;
-};
 

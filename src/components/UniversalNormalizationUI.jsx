@@ -2,583 +2,352 @@ import React, { useEffect, useState } from "react";
 import { Button } from "./ui/button.jsx";
 import { Card, CardContent } from "./ui/card.jsx";
 import { Input } from "./ui/input.jsx";
-import { Upload, FileDown } from "lucide-react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
-import JSZip from "jszip";
 import ReactFlow, { MiniMap, Controls, Background } from "reactflow";
 import "reactflow/dist/style.css";
-import { listTables, fetchTable, uploadNormalized } from "../api.js";
 import EditableNode from "./EditableNode";
 
-// --- Funciones de normalización originales ---
-// (Se mantienen las funciones de normalización si las requieres para otros casos)
+// =======================
+// UTILIDADES PARA 3FN
+// =======================
+const CLEAN_SPLIT = /[,;|/]+/;
+const toSQLName = (s = "") => {
+  return s.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^\d/, "x");
+};
 
+const isInt = (v) => /^-?\d+$/.test(String(v ?? "").trim());
+const isNum = (v) => /^-?\d+(\.\d+)?$/.test(String(v ?? "").trim());
+const isBool = (v) =>
+  ["true", "false", "0", "1", "si", "no", "yes", "y", "n"].includes(
+    String(v ?? "").trim().toLowerCase()
+  );
+const isDate = (v) => {
+  const s = String(v ?? "").trim();
+  if (!s) return false;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s) || /^\d{2}\/\d{2}\/\d{4}$/.test(s))
+    return true;
+  const d = new Date(s);
+  return !isNaN(d.getTime());
+};
+
+const inferSqlType = (values = []) => {
+  let allInt = true,
+    allNum = true,
+    allDate = true,
+    allBool = true,
+    maxLen = 0;
+  for (const raw of values) {
+    const v = raw == null ? "" : String(raw).trim();
+    maxLen = Math.max(maxLen, v.length);
+    if (!isInt(v)) allInt = false;
+    if (!isNum(v)) allNum = false;
+    if (!isDate(v)) allDate = false;
+    if (!isBool(v)) allBool = false;
+  }
+  if (allBool) return "BIT";
+  if (allInt) return "INT";
+  if (allNum) return "DECIMAL(18,6)";
+  if (allDate) return "DATETIME2";
+  const size = Math.min(Math.max(50, Math.ceil(maxLen / 10) * 10), 4000);
+  return `NVARCHAR(${size})`;
+};
+
+const normalize1FNRows = (rows) => {
+  let output = [];
+  let rowIndex = 0;
+  for (const row of rows) {
+    const maxSplit = Math.max(
+      ...Object.values(row).map((v) =>
+        typeof v === "string" && v.includes(",") ? v.split(",").length : 1
+      )
+    );
+    if (maxSplit === 1) {
+      output.push({ ...row, __origenID: `row_${rowIndex}` });
+    } else {
+      for (let i = 0; i < maxSplit; i++) {
+        const newRow = { __origenID: `row_${rowIndex}` };
+        for (const [k, v] of Object.entries(row)) {
+          if (typeof v === "string" && v.includes(",")) {
+            const parts = v.split(",").map((s) => s.trim());
+            newRow[k] = parts[i] ?? null;
+          } else {
+            newRow[k] = v;
+          }
+        }
+        output.push(newRow);
+      }
+    }
+    rowIndex++;
+  }
+  return output;
+};
+
+// =======================
+// Función actualizada para análisis y normalización (3FN)
+// =======================
+const analyzeDependencies = (data) => {
+  if (!data || !data.length) return { mainTable: null, candidateEntities: [] };
+
+  const THRESHOLD = 20;
+  const allColumns = Object.keys(data[0]);
+  let mainTableColumns = [...allColumns];
+  const candidateEntities = [];
+
+  allColumns.forEach((col) => {
+    const distinctCount = new Set(data.map((row) => row[col])).size;
+    if (distinctCount < THRESHOLD) {
+      const pkName = `ID_${col.toUpperCase()}`;
+      candidateEntities.push({
+        tableName: `Entidad_${toSQLName(col)}`,
+        primaryKey: pkName,
+        columns: [pkName, col],
+        types: {
+          [pkName]: "NVARCHAR(100)",
+          [col]: inferSqlType(data.map((row) => row[col])),
+        },
+        foreignKeys: []
+      });
+      mainTableColumns = mainTableColumns.filter((c) => c !== col);
+    }
+  });
+
+  const mainTable = {
+    tableName: "Tabla_Principal",
+    primaryKey: "ID_Main",
+    columns: ["ID_Main", ...mainTableColumns, ...candidateEntities.map((ent) => ent.primaryKey)],
+    foreignKeys: candidateEntities.map((ent) => ({
+      foreignKey: ent.primaryKey,
+      referencedTable: ent.tableName,
+      referencedField: ent.primaryKey,
+    })),
+    types: {}
+  };
+
+  mainTable.types["ID_Main"] = "NVARCHAR(100)";
+  mainTableColumns.forEach((col) => {
+    mainTable.types[toSQLName(col)] = inferSqlType(data.map((row) => row[col]));
+  });
+  candidateEntities.forEach((ent) => {
+    mainTable.types[ent.primaryKey] = "NVARCHAR(100)";
+  });
+
+  return { mainTable, candidateEntities };
+};
+
+
+// =======================
+// Función para generar Script SQL (incluye constraints de FK)
+// =======================
+const generateSqlFromAnalysis = (analysis) => {
+  const { mainTable, candidateEntities } = analysis;
+  const createDatabase = `CREATE DATABASE ProyectoNormalizacion;\n\nUSE ProyectoNormalizacion;\n\n`;
+
+  const mainTableColumnsScript = mainTable.columns.map((col) => {
+    const type = mainTable.types[col] || "NVARCHAR(100)";
+    return `  [${col}] ${type} ${col === mainTable.primaryKey ? "NOT NULL" : "NULL"}`;
+  }).join(",\n");
+  const mainPkScript = `  CONSTRAINT [PK_${toSQLName(mainTable.tableName)}] PRIMARY KEY ([${mainTable.primaryKey}])`;
+  const mainTableScript = `CREATE TABLE [${toSQLName(mainTable.tableName)}] (\n${mainTableColumnsScript},\n${mainPkScript}\n);`;
+
+  const mainFkScripts = mainTable.foreignKeys.map((fk) =>
+    `ALTER TABLE [${toSQLName(mainTable.tableName)}] ADD CONSTRAINT [FK_${toSQLName(mainTable.tableName)}_${toSQLName(fk.foreignKey)}] FOREIGN KEY ([${fk.foreignKey}]) REFERENCES [${toSQLName(fk.referencedTable)}] ([${toSQLName(fk.referencedField)}]);`
+  ).join("\n");
+
+  const candidateScripts = candidateEntities.map((entity) => {
+    const columnsScript = entity.columns.map((col) => {
+      const type = entity.types[col] || "NVARCHAR(100)";
+      return `  [${toSQLName(col)}] ${type} ${col === entity.primaryKey ? "NOT NULL" : "NULL"}`;
+    }).join(",\n");
+    const pkScript = `  CONSTRAINT [PK_${toSQLName(entity.tableName)}] PRIMARY KEY ([${toSQLName(entity.primaryKey)}])`;
+    return `CREATE TABLE [${toSQLName(entity.tableName)}] (\n${columnsScript},\n${pkScript}\n);`;
+  }).join("\n\n");
+
+  return createDatabase + mainTableScript + "\n\n" + mainFkScripts + "\n\n" + candidateScripts;
+};
+
+// =======================
+// Función para generar CSV a partir del análisis
+// =======================
+const generateCSVFromAnalysis = (analysis) => {
+  const { mainTable, candidateEntities } = analysis;
+  // Encabezado del CSV: Table, PrimaryKey, Columns, ForeignKeys
+  const rows = [];
+  rows.push(["Table", "PrimaryKey", "Columns", "ForeignKeys"]);
+  
+  // Agregamos la tabla principal
+  rows.push([
+    mainTable.tableName,
+    mainTable.primaryKey,
+    mainTable.columns.join(" | "),
+    mainTable.foreignKeys
+      .map(fk => `${fk.foreignKey} -> ${fk.referencedTable}(${fk.referencedField})`)
+      .join(" | ")
+  ]);
+  
+  // Agregamos cada entidad candidata
+  candidateEntities.forEach(ent => {
+    rows.push([
+      ent.tableName,
+      ent.primaryKey,
+      ent.columns.join(" | "),
+      "" // Las entidades candidatas no tienen FK propias
+    ]);
+  });
+  
+  // Convertir array de arrays a string CSV
+  return rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
+};
+
+// =======================
+// Funciones para descarga de archivos
+// =======================
+const downloadFile = (data, filename, type) => {
+  const blob = new Blob([data], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const downloadSQL = (sqlScript) => {
+  downloadFile(sqlScript, "script.sql", "text/sql");
+};
+
+const downloadCSV = (csvData) => {
+  downloadFile(csvData, "analysis.csv", "text/csv");
+};
+
+// =======================
+// Componente principal
+// =======================
 export default function UniversalNormalizationUI() {
-  const [previewData, setPreviewData] = useState([]);
-  const [fullData, setFullData] = useState([]);
-  const [tables, setTables] = useState(null);
+  const [data, setData] = useState([]);
+  const [sqlScript, setSqlScript] = useState("");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
-  const [fn, setFN] = useState("1FN");
-  const [serverTables, setServerTables] = useState([]);
-  const [selectedServerTable, setSelectedServerTable] = useState("");
-  const [loadingServer, setLoadingServer] = useState(false);
-  const [uploadReport, setUploadReport] = useState(null);
-
-  useEffect(() => {
-    listTables().then(setServerTables).catch(() => {});
-  }, []);
-
-  const handleFetchServerTable = async () => {
-    if (!selectedServerTable) return;
-    setLoadingServer(true);
-    try {
-      const rows = await fetchTable(selectedServerTable, 5000);
-      const cleanData = rows.filter((row) =>
-        Object.values(row).some((val) => val !== "" && val !== null && val !== undefined)
-      );
-      setPreviewData(cleanData.slice(0, 20));
-      setFullData(cleanData);
-      setTables(null);
-      setNodes([]);
-      setEdges([]);
-    } catch (e) {
-      alert("Error cargando tabla: " + e.message);
-    } finally {
-      setLoadingServer(false);
-    }
-  };
-
-  const handleUploadNormalized = async () => {
-    if (!tables) return;
-    try {
-      const resp = await uploadNormalized(tables, { schema: "dbo", ifExists: "drop" });
-      setUploadReport(resp);
-      alert("Normalización subida a SQL Server.");
-    } catch (e) {
-      alert("Error subiendo normalización: " + e.message);
-    }
-  };
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [alertMsg, setAlertMsg] = useState(""); // Estado para el mensaje de alerta
 
   const handleFileUpload = (e) => {
-    const uploadedFile = e.target.files[0];
-    if (!uploadedFile) return;
-    if (uploadedFile.name.endsWith(".csv")) {
-      Papa.parse(uploadedFile, {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.name.endsWith(".csv")) {
+      Papa.parse(file, {
         header: true,
+        skipEmptyLines: true,
         complete: (results) => {
-          const cleanData = results.data.filter((row) =>
-            Object.values(row).some((val) => val !== "" && val !== null && val !== undefined)
+          const cleanData = results.data.filter(row =>
+            Object.values(row).some(val => val !== "" && val != null)
           );
-          setPreviewData(cleanData.slice(0, 20));
-          setFullData(cleanData);
-          setTables(null);
-          setNodes([]);
-          setEdges([]);
-          alert("Tabla cargada. Forma normal para análisis: " + fn);
+          const normalized = normalize1FNRows(cleanData);
+          setData(normalized);
         },
       });
-    } else if (uploadedFile.name.endsWith(".xlsx") || uploadedFile.name.endsWith(".xls")) {
+    } else if (file.name.endsWith(".xlsx") || file.name.endsWith(".xls")) {
       const reader = new FileReader();
       reader.onload = (evt) => {
         const data = new Uint8Array(evt.target.result);
         const workbook = XLSX.read(data, { type: "array" });
         const worksheet = workbook.Sheets[workbook.SheetNames[0]];
         const jsonData = XLSX.utils.sheet_to_json(worksheet);
-        setPreviewData(jsonData.slice(0, 20));
-        setFullData(jsonData);
-        setTables(null);
-        setNodes([]);
-        setEdges([]);
-        alert("Tabla cargada. Forma normal para análisis: " + fn);
+        const cleanData = jsonData.filter(row =>
+          Object.values(row).some(val => val !== "" && val != null)
+        );
+        const normalized = normalize1FNRows(cleanData);
+        setData(normalized);
       };
-      reader.readAsArrayBuffer(uploadedFile);
+      reader.readAsArrayBuffer(file);
+    } else {
+      alert("Por favor, sube un archivo CSV o Excel.");
     }
   };
 
-  // --- Función para construir la estructura predefinida ---
-  // Estas 8 tablas se mostrarán en React Flow
-  const handleNormalize = () => {
-    // Se ignora el contenido de fullData y se usa la estructura predefinida:
-    const predefinedTables = {
-      "Proveedor": [
-        {
-          "ID_Proveedor": null,
-          "Proveedor": null,
-          "Pais": null,
-          "Ciudad": null,
-          "Dirección": null,
-        },
-      ],
-      "Contacto": [
-        {
-          "ID_Contacto": null,
-          "ID_Proveedor": null,
-          "Contacto": null,
-          "Email": null,
-          "Teléfono": null,
-        },
-      ],
-      "Producto": [
-        {
-          "ID_Producto": null,
-          "Producto": null,
-          "Categoría": null,
-          "Precio_Unitario": null,
-        },
-      ],
-      "Pedido": [
-        {
-          "ID_Pedido": null,
-          "Fecha_Pedido": null,
-          "Estado_Pedido": null,
-          "ID_Proveedor": null,
-        },
-      ],
-      "Detalle_Pedido": [
-        {
-          "ID_Pedido": null,
-          "ID_Producto": null,
-          "Cantidad": null,
-          "Descuento": null,
-          "Promoción": null,
-        },
-      ],
-      "Pago": [
-        {
-          "ID_Pago": null,
-          "ID_Pedido": null,
-          "Método_Pago": null,
-          "Referencia_Pago": null,
-          "Saldo_Pendiente": null,
-        },
-      ],
-      "Vendedor": [
-        {
-          "ID_Vendedor": null,
-          "Vendedor": null,
-          "Teléfono_Vendedor": null,
-        },
-      ],
-      "Envío": [
-        {
-          "ID_Envio": null,
-          "ID_Pedido": null,
-          "Empresa_Envio": null,
-          "Costo_Envio": null,
-          "Fecha_Entrega": null,
-        },
-      ],
-    };
-    setTables(predefinedTables);
-
-    // Definir las claves primarias (PK) para cada tabla
-    const tablePKs = {
-      "Proveedor": "ID_Proveedor",
-      "Contacto": "ID_Contacto",
-      "Producto": "ID_Producto",
-      "Pedido": "ID_Pedido",
-      "Pago": "ID_Pago",
-      "Vendedor": "ID_Vendedor",
-      "Envío": "ID_Envio",
-      // La tabla Detalle_Pedido tiene claves foráneas (FK) compuestas
-    };
-
-    // Construir nodos para React Flow a partir de la estructura predefinida
-    const buildNode = (tableName, columns) => ({
-      id: tableName,
-      data: {
-        tableName,
-        columns,
-        primaryKey: tablePKs[tableName] || null,
-        label: (
-          <div>
-            <strong>{tableName}</strong>
-            <ul style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>
-              {columns.map((c) => (
-                <li
-                  key={c}
-                  style={
-                    c === (tablePKs[tableName] || "")
-                      ? { color: "#1d4ed8", fontWeight: 700 }
-                      : {}
-                  }
-                >
-                  {c}{" "}
-                  {c === (tablePKs[tableName] || "") && (
-                    <span style={{ fontSize: 11 }}>(PK)</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ),
-      },
-      position: {
-        // Posiciones aleatorias; puedes modificar la lógica para posicionarlas de forma más ordenada
-        x: Math.random() * 400,
-        y: Math.random() * 400,
-      },
-      type: "editable",
-      style: {
-        borderRadius: 18,
-        padding: 10,
-        background: "#F0F9FF",
-        minWidth: 190,
-        border: "2px solid #38bdf8",
-        boxShadow: "0 2px 10px #bae6fd",
-      },
-    });
-
-    const predefinedNodes = Object.entries(predefinedTables).map(([tableName, rows]) => {
-      const columns = Object.keys(rows[0]);
-      return buildNode(tableName, columns);
-    });
-    setNodes(predefinedNodes);
-
-    // Definir las relaciones (aristas) según las FK especificadas
-    const predefinedEdges = [
-      {
-        id: "Contacto_ID_Proveedor_Proveedor",
-        source: "Contacto",
-        target: "Proveedor",
-        label: "ID_Proveedor",
-      },
-      {
-        id: "Pedido_ID_Proveedor_Proveedor",
-        source: "Pedido",
-        target: "Proveedor",
-        label: "ID_Proveedor",
-      },
-      {
-        id: "Detalle_Pedido_ID_Pedido_Pedido",
-        source: "Detalle_Pedido",
-        target: "Pedido",
-        label: "ID_Pedido",
-      },
-      {
-        id: "Detalle_Pedido_ID_Producto_Producto",
-        source: "Detalle_Pedido",
-        target: "Producto",
-        label: "ID_Producto",
-      },
-      {
-        id: "Pago_ID_Pedido_Pedido",
-        source: "Pago",
-        target: "Pedido",
-        label: "ID_Pedido",
-      },
-      {
-        id: "Envío_ID_Pedido_Pedido",
-        source: "Envío",
-        target: "Pedido",
-        label: "ID_Pedido",
-      },
-    ];
-    setEdges(predefinedEdges);
-  };
-
-  // --- Función para generar el script SQL a partir de la estructura predefinida ---
-  const exportPredefinedToSQL = (tables) => {
-    let sql = "";
-    for (const [tableName, rows] of Object.entries(tables)) {
-      const columns = Object.keys(rows[0]);
-      sql += `CREATE TABLE [${tableName}] (\n`;
-      columns.forEach((col, index) => {
-        // Determinar si es clave primaria
-        let isPK = false;
-        if (
-          (tableName === "Proveedor" && col === "ID_Proveedor") ||
-          (tableName === "Contacto" && col === "ID_Contacto") ||
-          (tableName === "Producto" && col === "ID_Producto") ||
-          (tableName === "Pedido" && col === "ID_Pedido") ||
-          (tableName === "Pago" && col === "ID_Pago") ||
-          (tableName === "Vendedor" && col === "ID_Vendedor") ||
-          (tableName === "Envío" && col === "ID_Envio")
-        ) {
-          isPK = true;
-        }
-        sql += `  [${col}] NVARCHAR(100)${isPK ? " NOT NULL" : " NULL"}`;
-        sql += index < columns.length - 1 ? ",\n" : "\n";
-      });
-      // Para tablas que tengan clave primaria definida
-      if (tableName !== "Detalle_Pedido") {
-        const pkMap = {
-          "Proveedor": "ID_Proveedor",
-          "Contacto": "ID_Contacto",
-          "Producto": "ID_Producto",
-          "Pedido": "ID_Pedido",
-          "Pago": "ID_Pago",
-          "Vendedor": "ID_Vendedor",
-          "Envío": "ID_Envio",
-        };
-        const pk = pkMap[tableName];
-        if (pk) {
-          sql += `, CONSTRAINT [PK_${tableName}] PRIMARY KEY ([${pk}])\n`;
-        }
-      }
-      sql += `);\n\n`;
+  const handleAnalyze = () => {
+    if (!data.length) {
+      alert("No se ha cargado data.");
+      return;
     }
-    // Agregar las restricciones de clave foránea
-    sql += `ALTER TABLE [Contacto] ADD CONSTRAINT [FK_Contacto_Proveedor] FOREIGN KEY ([ID_Proveedor]) REFERENCES [Proveedor]([ID_Proveedor]);\n`;
-    sql += `ALTER TABLE [Pedido] ADD CONSTRAINT [FK_Pedido_Proveedor] FOREIGN KEY ([ID_Proveedor]) REFERENCES [Proveedor]([ID_Proveedor]);\n`;
-    sql += `ALTER TABLE [Detalle_Pedido] ADD CONSTRAINT [FK_DetallePedido_Pedido] FOREIGN KEY ([ID_Pedido]) REFERENCES [Pedido]([ID_Pedido]);\n`;
-    sql += `ALTER TABLE [Detalle_Pedido] ADD CONSTRAINT [FK_DetallePedido_Producto] FOREIGN KEY ([ID_Producto]) REFERENCES [Producto]([ID_Producto]);\n`;
-    sql += `ALTER TABLE [Pago] ADD CONSTRAINT [FK_Pago_Pedido] FOREIGN KEY ([ID_Pedido]) REFERENCES [Pedido]([ID_Pedido]);\n`;
-    sql += `ALTER TABLE [Envío] ADD CONSTRAINT [FK_Envio_Pedido] FOREIGN KEY ([ID_Pedido]) REFERENCES [Pedido]([ID_Pedido]);\n`;
-    return sql;
+    setAlertMsg("Los datos insertados fueron transformados a 3FN.");
+    const analysis = analyzeDependencies(data);
+    setAnalysisResult(analysis);
+    const sql = generateSqlFromAnalysis(analysis);
+    setSqlScript(sql);
+    const allEntities = [analysis.mainTable, ...analysis.candidateEntities];
+    setNodes(generateReactFlowNodesFromEntities(allEntities));
+    setEdges(generateReactFlowEdgesFromEntities(allEntities));
   };
-
-  // Manejadores de cambios en React Flow
-  function onNodesChange(changes) {
-    setNodes((nds) =>
-      nds.map((node) => {
-        const change = changes.find((c) => c.id === node.id);
-        return change ? { ...node, ...change } : node;
-      })
-    );
-  }
-
-  function onEdgesChange(changes) {
-    setEdges((eds) =>
-      eds.map((edge) => {
-        const change = changes.find((c) => c.id === edge.id);
-        return change ? { ...edge, ...change } : edge;
-      })
-    );
-  }
-
-  function onConnect(params) {
-    setEdges((eds) => [...eds, params]);
-  }
-
-  const nodeTypes = { editable: EditableNode };
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 24,
-        padding: 32,
-        minHeight: "100vh",
-      }}
-    >
+    <div style={{ padding: 24 }}>
+      <h1 style={{ textAlign: "center", fontWeight: "bold", marginBottom: 24, color: "#1976d2" }}>
+        PROYECTO NORMALIZACION ADB2 GRUPO#3
+      </h1>
       <Card>
         <CardContent>
-          <h1
-            style={{
-              fontSize: 24,
-              fontWeight: 700,
-              color: "#374151",
-              marginBottom: 12,
-            }}
-          >
-            Normalización Universal de Datos
-          </h1>
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            <Input type="file" onChange={handleFileUpload} />
-            <div
-              style={{ display: "flex", alignItems: "center", gap: 8 }}
-            >
-              <label style={{ fontSize: 14, color: "#374151" }}>
-                Forma Normal:
-              </label>
-              <select
-                value={fn}
-                onChange={(e) => setFN(e.target.value)}
-                style={{
-                  padding: "8px 10px",
-                  border: "1px solid #d1d5db",
-                  borderRadius: 10,
-                }}
-              >
-                <option value="1FN">1FN</option>
-                <option value="2FN">2FN</option>
-                <option value="3FN">3FN</option>
-              </select>
-            </div>
-            <Button
-              onClick={handleNormalize}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-              }}
-            >
-              <Upload size={16} /> Normalizar y visualizar
-            </Button>
-          </div>
+          <h2>Normalización Universal</h2>
+          <Input type="file" onChange={handleFileUpload} />
+          <Button onClick={handleAnalyze}>Analizar y Generar SQL</Button>
         </CardContent>
       </Card>
-
-      <Card>
-        <CardContent>
-          <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>
-            Cargar tabla desde SQL Server
-          </h2>
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              flexWrap: "wrap",
-              alignItems: "center",
-            }}
-          >
-            <select
-              value={selectedServerTable}
-              onChange={(e) => setSelectedServerTable(e.target.value)}
-              style={{
-                padding: "8px 10px",
-                border: "1px solid #d1d5db",
-                borderRadius: 10,
-                minWidth: 260,
-              }}
-            >
-              <option value="">-- selecciona una tabla --</option>
-              {serverTables.map((t, i) => {
-                const name = t.TABLE_SCHEMA
-                  ? `${t.TABLE_SCHEMA}.${t.TABLE_NAME}`
-                  : t.TABLE_NAME;
-                return (
-                  <option key={i} value={name}>
-                    {name}
-                  </option>
-                );
-              })}
-            </select>
-            <Button
-              onClick={handleFetchServerTable}
-              disabled={!selectedServerTable || loadingServer}
-            >
-              {loadingServer ? "Cargando..." : "Cargar tabla"}
-            </Button>
-            {tables && (
-              <Button
-                onClick={handleUploadNormalized}
-                style={{ marginLeft: 8 }}
-              >
-                Subir normalización a SQL Server
-              </Button>
-            )}
-          </div>
-          {uploadReport && (
-            <pre
-              style={{
-                marginTop: 12,
-                background: "#f3f4f6",
-                padding: 12,
-                borderRadius: 8,
-                maxHeight: 200,
-                overflow: "auto",
-              }}
-            >
-              {JSON.stringify(uploadReport, null, 2)}
-            </pre>
-          )}
-        </CardContent>
-      </Card>
-
-      {tables && (
-        <Card>
+      {/* Card con mensaje de alerta */}
+      {alertMsg && (
+        <Card style={{ marginTop: 24, background: "#e3f2fd" }}>
           <CardContent>
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
-              <Button
-                onClick={() => {
-                  exportAllToCSVZip(tables);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                }}
-              >
-                <FileDown size={15} /> Exportar todas a CSV (ZIP)
+            <p style={{ textAlign: "center", fontWeight: "bold" }}>{alertMsg}</p>
+          </CardContent>
+        </Card>
+      )}
+      {sqlScript && (
+        <Card style={{ marginTop: 24 }}>
+          <CardContent>
+            <h3>Script SQL Generado</h3>
+            <pre style={{ overflowX: "auto", background: "#f4f4f4", padding: 12 }}>
+              {sqlScript}
+            </pre>
+            <div style={{ marginTop: 12 }}>
+              <Button onClick={() => downloadSQL(sqlScript)}>
+                Descargar Script SQL
               </Button>
-              <Button
-                onClick={() => {
-                  const sql = exportPredefinedToSQL(tables);
-                  const blob = new Blob([sql], { type: "text/sql" });
-                  const link = document.createElement("a");
-                  link.href = URL.createObjectURL(blob);
-                  link.download = "tablas_normalizadas.sql";
-                  link.click();
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                }}
-              >
-                <FileDown size={15} /> Exportar todas a SQL
-              </Button>
-              <span style={{ fontSize: 12, color: "#1e3a8a" }}>
-                Exporta todas las entidades generadas en tu normalización.
-              </span>
+              {analysisResult && (
+                <Button
+                  style={{ marginLeft: 12 }}
+                  onClick={() => {
+                    const csv = generateCSVFromAnalysis(analysisResult);
+                    downloadCSV(csv);
+                  }}
+                >
+                  Descargar CSV
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
       )}
-
-      {previewData.length > 0 && (
-        <Card>
+      {/* Vista Previa de los datos */}
+      {data.length > 0 && (
+        <Card style={{ marginTop: 24 }}>
           <CardContent>
-            <h2
-              style={{ fontWeight: 600, marginBottom: 8, fontSize: 18 }}
-            >
-              Vista previa (primeras 20 filas)
-            </h2>
+            <h3 style={{ textAlign: "center", marginBottom: 12 }}>Vista Previa del Archivo Subido</h3>
             <div style={{ overflowX: "auto" }}>
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 12,
-                }}
-              >
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
-                    {Object.keys(previewData[0]).map((key) => (
-                      <th
-                        key={key}
-                        style={{
-                          border: "1px solid #e5e7eb",
-                          padding: "6px 8px",
-                          background: "#f3f4f6",
-                        }}
-                      >
-                        {key}
+                    {Object.keys(data[0]).map((header, index) => (
+                      <th key={index} style={{ border: "1px solid #ddd", padding: "8px", backgroundColor: "#f2f2f2" }}>
+                        {header}
                       </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {previewData.map((row, i) => (
+                  {data.slice(0, 10).map((row, i) => (
                     <tr key={i}>
-                      {Object.values(row).map((val, j) => (
-                        <td
-                          key={j}
-                          style={{
-                            border: "1px solid #e5e7eb",
-                            padding: "6px 8px",
-                          }}
-                        >
-                          {String(val)}
+                      {Object.values(row).map((cell, j) => (
+                        <td key={j} style={{ border: "1px solid #ddd", padding: "8px" }}>
+                          {cell ?? ""}
                         </td>
                       ))}
                     </tr>
@@ -586,53 +355,91 @@ export default function UniversalNormalizationUI() {
                 </tbody>
               </table>
             </div>
+            <p style={{ fontSize: 12, marginTop: 8 }}>Mostrando las primeras 10 filas</p>
           </CardContent>
         </Card>
       )}
-
+      {/* Diagrama ER - React Flow al final */}
       {nodes.length > 0 && (
-        <Card>
+        <Card style={{ marginTop: 24, height: 500 }}>
           <CardContent>
-            <h2
-              style={{ fontWeight: 600, marginBottom: 8, fontSize: 18 }}
-            >
-              Diagrama de entidades y relaciones
-            </h2>
-            <div
-              style={{
-                width: "100%",
-                height: 470,
-                background: "#fff",
-                border: "1px solid #e5e7eb",
-                borderRadius: 12,
-              }}
-            >
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                nodeTypes={nodeTypes}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
-                fitView
-              >
-                <MiniMap />
-                <Controls />
-                <Background gap={22} />
-              </ReactFlow>
-            </div>
-            <p
-              style={{
-                marginTop: 12,
-                fontSize: 12,
-                color: "#1d4ed8",
-              }}
-            >
-              * El color azul indica claves primarias.
-            </p>
+            <ReactFlow nodes={nodes} edges={edges} fitView>
+              <MiniMap />
+              <Controls />
+              <Background gap={16} />
+            </ReactFlow>
           </CardContent>
         </Card>
       )}
     </div>
   );
 }
+
+// =======================
+// Funciones para generación de React Flow nodes y edges
+// =======================
+function buildNode(tableDef) {
+  return ({
+    id: tableDef.tableName,
+    data: {
+      tableName: tableDef.tableName,
+      columns: tableDef.columns,
+      primaryKey: tableDef.primaryKey,
+      foreignKeys: tableDef.foreignKeys || [],
+      label: (
+        <div>
+          <strong>{tableDef.tableName}</strong>
+          <p style={{ fontSize: 12, margin: "4px 0" }}>
+            PK: {Array.isArray(tableDef.primaryKey) ? tableDef.primaryKey.join(", ") : tableDef.primaryKey}
+          </p>
+          {tableDef.foreignKeys && tableDef.foreignKeys.length > 0 && (
+            <p style={{ fontSize: 12, margin: "4px 0" }}>
+              FK:&nbsp;
+              {tableDef.foreignKeys
+                .map(fk => `${fk.foreignKey} → ${fk.referencedTable}(${fk.referencedField})`)
+                .join(", ")}
+            </p>
+          )}
+          <ul style={{ fontSize: 12, marginTop: 8, paddingLeft: 18 }}>
+            {tableDef.columns.map(c => (<li key={c}>{c}</li>))}
+          </ul>
+        </div>
+      ),
+    },
+    position: { x: Math.random() * 400, y: Math.random() * 400 },
+    type: "editable",
+    style: {
+      borderRadius: 18,
+      padding: 10,
+      background: "#F0F9FF",
+      minWidth: 190,
+      border: "2px solid #38bdf8",
+      boxShadow: "0 2px 10px #bae6fd",
+    },
+  });
+}
+
+const generateReactFlowNodesFromEntities = (entities) => {
+  return entities.map((entity) => buildNode(entity));
+};
+
+const generateReactFlowEdgesFromEntities = (entities) => {
+  const edges = [];
+  for (const entity of entities) {
+    for (const fk of entity.foreignKeys || []) {
+      const target = entities.find((e) => e.primaryKey === fk);
+      if (target) {
+        edges.push({
+          id: `${entity.name}->${target.name}`,
+          source: entity.name,
+          target: target.name,
+          label: `FK: ${fk.foreignKey}`,
+          animated: true,
+          type: "smoothstep",
+        });
+      }
+    }
+  }
+  return edges;
+};
+
